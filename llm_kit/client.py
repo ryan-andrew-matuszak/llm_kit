@@ -148,9 +148,19 @@ def resolve_key(provider: str, api_key: str | None) -> str:
     return key
 
 
+def price_for(model: str) -> tuple[float, float]:
+    """(input, output) $/1M for a model. Falls back to the longest PRICES key the
+    model id starts with, so a dated id (claude-haiku-4-5-20251001) still matches
+    its base entry (claude-haiku-4-5). Unknown ⇒ (0.0, 0.0)."""
+    if model in PRICES:
+        return PRICES[model]
+    hits = [k for k in PRICES if model.startswith(k)]
+    return PRICES[max(hits, key=len)] if hits else (0.0, 0.0)
+
+
 def estimate_cost(usage: Usage, model: str) -> float:
     """Dollar cost of a turn's tokens against `PRICES` (0.0 for unknown models)."""
-    in_rate, out_rate = PRICES.get(model, (0.0, 0.0))
+    in_rate, out_rate = price_for(model)
     return (usage.input_tokens * in_rate + usage.output_tokens * out_rate) / 1_000_000
 
 
