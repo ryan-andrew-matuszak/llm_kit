@@ -166,3 +166,44 @@ def test_missing_key_raises(monkeypatch):
 def test_unknown_provider_raises():
     with pytest.raises(LLMError):
         chat_with_tools([{"role": "user", "content": "x"}], provider="nope", api_key="k")
+
+
+# --- server tools (web_search) + pause_turn ----------------------------------
+
+def test_server_tool_passthrough_and_openai_skip():
+    server = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+    a = c._anthropic_tools([server] + TOOLS)
+    assert a[0] == server                       # passed through untouched
+    assert a[1]["name"] == "turn_off"           # neutral tool still converted
+    o = c._openai_tools([server] + TOOLS)
+    assert [t["function"]["name"] for t in o] == ["turn_off"]   # server tool dropped
+
+
+@pytest.mark.asyncio
+async def test_anthropic_pause_turn_continues(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={
+                "content": [{"type": "text", "text": "searching…"}],
+                "stop_reason": "pause_turn", "usage": {"input_tokens": 10, "output_tokens": 2}})
+        return httpx.Response(200, json={
+            "content": [{"type": "text", "text": "The Padres won 5-3."}],
+            "stop_reason": "end_turn", "usage": {"input_tokens": 8, "output_tokens": 6}})
+
+    real = httpx.AsyncClient
+
+    def fake(*a, **k):
+        k["transport"] = httpx.MockTransport(handler)
+        return real(*a, **k)
+
+    monkeypatch.setattr(c.httpx, "AsyncClient", fake)
+    turn = await c.achat_with_tools(
+        [{"role": "user", "content": "who won the game"}],
+        [{"type": "web_search_20250305", "name": "web_search"}],
+        provider="anthropic", api_key="k")
+    assert calls["n"] == 2                       # paused, then continued
+    assert turn.text == "The Padres won 5-3." and turn.stop_reason == "end_turn"
+    assert turn.usage.input_tokens == 18 and turn.usage.output_tokens == 8   # summed

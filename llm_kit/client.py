@@ -168,14 +168,20 @@ def estimate_cost(usage: Usage, model: str) -> float:
 
 
 def _anthropic_tools(tools: list[dict] | None) -> list[dict]:
-    """Provider-neutral ``{name, description, parameters}`` -> Anthropic tools."""
+    """Provider-neutral ``{name, description, parameters}`` -> Anthropic tools.
+    A tool dict carrying a ``type`` (e.g. a server tool like
+    ``{"type": "web_search_20250305", "name": "web_search"}``) is passed through
+    untouched — Anthropic runs it server-side."""
     out = []
     for t in tools or []:
-        out.append({
-            "name": t["name"],
-            "description": t.get("description", ""),
-            "input_schema": t.get("parameters") or {"type": "object", "properties": {}},
-        })
+        if t.get("type"):
+            out.append(dict(t))
+        else:
+            out.append({
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "input_schema": t.get("parameters") or {"type": "object", "properties": {}},
+            })
     return out
 
 
@@ -247,6 +253,8 @@ def _anthropic_parse(data: dict) -> ChatTurn:
 def _openai_tools(tools: list[dict] | None) -> list[dict]:
     out = []
     for t in tools or []:
+        if t.get("type"):
+            continue  # a provider-native server tool (e.g. Anthropic web_search) — not for OpenAI
         out.append({"type": "function", "function": {
             "name": t["name"],
             "description": t.get("description", ""),
@@ -384,13 +392,30 @@ async def achat_with_tools(
     key = resolve_key(prov, api_key)
     url, headers, payload = _build_request(prov, mdl, key, messages, tools,
                                            max_tokens, temperature)
+    anthropic = PROVIDERS[prov]["family"] == "anthropic"
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
+            turn = _parse(prov, data)
+            # Server tools (e.g. web_search) can make Anthropic pause mid-turn; it
+            # asks us to continue by echoing its content back. Loop until it's done.
+            guard = 0
+            while anthropic and turn.stop_reason == "pause_turn" and guard < 4:
+                guard += 1
+                payload["messages"].append({"role": "assistant", "content": data.get("content", [])})
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                nxt = _parse(prov, data)
+                turn = ChatTurn(
+                    text=nxt.text, tool_calls=nxt.tool_calls, stop_reason=nxt.stop_reason,
+                    usage=Usage(turn.usage.input_tokens + nxt.usage.input_tokens,
+                                turn.usage.output_tokens + nxt.usage.output_tokens),
+                    raw=nxt.raw)
     except httpx.HTTPStatusError as exc:
         raise LLMError(f"{prov} HTTP {exc.response.status_code}: {exc.response.text[:400]}") from exc
     except httpx.HTTPError as exc:
         raise LLMError(f"{prov} request failed: {exc}") from exc
-    return _parse(prov, data)
+    return turn
