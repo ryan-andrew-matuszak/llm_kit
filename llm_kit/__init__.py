@@ -24,6 +24,7 @@ from .client import (
     tool_calls_message,
     tool_result_message,
 )
+from .ledger import ledger_path, read_usage, record_usage
 
 __all__ = [
     "chat_with_tools",
@@ -40,6 +41,9 @@ __all__ = [
     "PROVIDERS",
     "PRICES",
     "LLMError",
+    "record_usage",
+    "read_usage",
+    "ledger_path",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -60,6 +60,21 @@ branches on provider:
 Append the assistant tool-call turn, then one result message per call, then call
 again. Stop when a turn comes back with no `tool_calls`.
 
+## Streaming
+
+`astream_text(messages, provider=..., model=..., usage=Usage())` is an async
+generator of text deltas (no tools) over each family's SSE stream. Pass a
+`Usage()` to get the turn's token counts filled in when the stream ends.
+
+## Shared usage ledger
+
+`record_usage(provider, model, usage)` appends one JSON line to
+`$LLM_USAGE_LEDGER` (default `~/.local/share/llm_kit/usage.jsonl`);
+`read_usage(since=...)` reads it back. Every app on a machine can write to the
+same ledger so one dashboard shows total spend. **There is deliberately no app
+field** — the ledger says what was spent on which model, never which app spent
+it, so a dashboard built on it can't reveal what's installed.
+
 ## Budget
 
 `turn.usage` carries `input_tokens` / `output_tokens`; `estimate_cost(usage,

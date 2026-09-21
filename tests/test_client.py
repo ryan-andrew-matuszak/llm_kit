@@ -254,3 +254,40 @@ def test_astream_text_http_error():
     with pytest.raises(LLMError):
         _asyncio.run(_collect(astream_text([{"role": "user", "content": "hi"}],
                                            provider="openai", api_key="k", transport=t)))
+
+
+def test_astream_text_reports_usage_both_families():
+    from llm_kit import Usage
+    t = _sse(['{"type":"message_start","message":{"usage":{"input_tokens":42}}}',
+              '{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}',
+              '{"type":"message_delta","usage":{"output_tokens":7}}'])
+    u = Usage()
+    _asyncio.run(_collect(astream_text([{"role": "user", "content": "hi"}], provider="anthropic",
+                                       api_key="k", transport=t, usage=u)))
+    assert (u.input_tokens, u.output_tokens) == (42, 7)
+
+    seen = {}
+    def handler(req):
+        import json as _json
+        seen["body"] = _json.loads(req.content)
+        body = ("data: " + '{"choices":[{"delta":{"content":"y"}}]}' + "\n\n"
+                "data: " + '{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3}}' + "\n\n"
+                "data: [DONE]\n\n").encode()
+        return _httpx.Response(200, content=body)
+    u = Usage()
+    _asyncio.run(_collect(astream_text([{"role": "user", "content": "hi"}], provider="xai",
+                                       api_key="k", transport=_httpx.MockTransport(handler), usage=u)))
+    assert (u.input_tokens, u.output_tokens) == (11, 3)
+    assert seen["body"]["stream_options"] == {"include_usage": True}
+
+
+def test_ledger_roundtrip_has_no_app_field(tmp_path):
+    from llm_kit import Usage, read_usage, record_usage
+    path = tmp_path / "usage.jsonl"
+    row = record_usage("xai", "grok-4.7", Usage(100, 20), path=path)
+    record_usage("anthropic", "claude-haiku-4-5", Usage(1000, 500), path=path)
+    rows = read_usage(path=path)
+    assert [r["model"] for r in rows] == ["grok-4.7", "claude-haiku-4-5"]
+    assert set(row) == {"ts", "provider", "model", "in", "out", "cost"}   # no app name, by design
+    assert rows[1]["cost"] == round((1000 * 1.0 + 500 * 5.0) / 1_000_000, 6)
+    assert read_usage(path=tmp_path / "missing.jsonl") == []

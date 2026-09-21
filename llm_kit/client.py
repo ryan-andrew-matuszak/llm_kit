@@ -438,6 +438,22 @@ def _stream_delta(family: str, event: dict) -> str:
     return ""
 
 
+def _stream_usage(family: str, event: dict, usage: Usage) -> None:
+    """Accumulate token counts from one SSE event into `usage`."""
+    if family == "anthropic":
+        if event.get("type") == "message_start":
+            u = (event.get("message") or {}).get("usage") or {}
+            usage.input_tokens = int(u.get("input_tokens") or 0)
+        elif event.get("type") == "message_delta":
+            u = event.get("usage") or {}
+            usage.output_tokens = int(u.get("output_tokens") or usage.output_tokens)
+        return
+    u = event.get("usage")
+    if u:
+        usage.input_tokens = int(u.get("prompt_tokens") or 0)
+        usage.output_tokens = int(u.get("completion_tokens") or 0)
+
+
 async def astream_text(
     messages: list[dict],
     *,
@@ -448,11 +464,14 @@ async def astream_text(
     temperature: float = 0.8,
     timeout: float = 120.0,
     transport: httpx.AsyncBaseTransport | None = None,
+    usage: Usage | None = None,
 ):
     """Async generator of text deltas for a plain (tool-free) chat turn.
 
     Same canonical messages and config resolution as `achat_with_tools`; uses each
     wire family's SSE stream (``stream: true``). For typing-effect UIs.
+    Pass a `Usage()` as `usage` to have it filled with the turn's token counts
+    once the stream ends (an async generator can't return a value).
     Raises `LLMError` on transport/HTTP/credential failure."""
     prov = resolve_provider(provider)
     mdl = resolve_model(prov, model)
@@ -461,6 +480,8 @@ async def astream_text(
                                            max_tokens, temperature)
     payload["stream"] = True
     family = PROVIDERS[prov]["family"]
+    if family == "openai":
+        payload["stream_options"] = {"include_usage": True}   # final chunk carries usage
     try:
         async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
@@ -479,6 +500,8 @@ async def astream_text(
                         continue
                     if family == "anthropic" and event.get("type") == "error":
                         raise LLMError(f"{prov} stream error: {event.get('error')}")
+                    if usage is not None:
+                        _stream_usage(family, event, usage)
                     text = _stream_delta(family, event)
                     if text:
                         yield text
