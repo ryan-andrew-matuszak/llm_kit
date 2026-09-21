@@ -16,6 +16,7 @@ from .client import (
     ToolCall,
     Usage,
     achat_with_tools,
+    astream_text,
     chat_with_tools,
     estimate_cost,
     resolve_model,
@@ -27,6 +28,7 @@ from .client import (
 __all__ = [
     "chat_with_tools",
     "achat_with_tools",
+    "astream_text",
     "ChatTurn",
     "ToolCall",
     "Usage",
@@ -40,4 +42,4 @@ __all__ = [
     "LLMError",
 ]
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"

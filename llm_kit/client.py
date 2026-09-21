@@ -419,3 +419,68 @@ async def achat_with_tools(
     except httpx.HTTPError as exc:
         raise LLMError(f"{prov} request failed: {exc}") from exc
     return turn
+
+
+# --- streaming text (no tools) -----------------------------------------------
+
+
+def _stream_delta(family: str, event: dict) -> str:
+    """Pull the text delta out of one parsed SSE event ('' when it carries none)."""
+    if family == "anthropic":
+        if event.get("type") == "content_block_delta":
+            delta = event.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                return delta.get("text", "")
+        return ""
+    choices = event.get("choices") or []
+    if choices:
+        return (choices[0].get("delta") or {}).get("content") or ""
+    return ""
+
+
+async def astream_text(
+    messages: list[dict],
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+    max_tokens: int = 1024,
+    temperature: float = 0.8,
+    timeout: float = 120.0,
+    transport: httpx.AsyncBaseTransport | None = None,
+):
+    """Async generator of text deltas for a plain (tool-free) chat turn.
+
+    Same canonical messages and config resolution as `achat_with_tools`; uses each
+    wire family's SSE stream (``stream: true``). For typing-effect UIs.
+    Raises `LLMError` on transport/HTTP/credential failure."""
+    prov = resolve_provider(provider)
+    mdl = resolve_model(prov, model)
+    key = resolve_key(prov, api_key)
+    url, headers, payload = _build_request(prov, mdl, key, messages, None,
+                                           max_tokens, temperature)
+    payload["stream"] = True
+    family = PROVIDERS[prov]["family"]
+    try:
+        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode(errors="replace")
+                    raise LLMError(f"{prov} HTTP {resp.status_code}: {body[:400]}")
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if family == "anthropic" and event.get("type") == "error":
+                        raise LLMError(f"{prov} stream error: {event.get('error')}")
+                    text = _stream_delta(family, event)
+                    if text:
+                        yield text
+    except httpx.HTTPError as exc:
+        raise LLMError(f"{prov} request failed: {exc}") from exc

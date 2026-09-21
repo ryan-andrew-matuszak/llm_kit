@@ -207,3 +207,50 @@ async def test_anthropic_pause_turn_continues(monkeypatch):
     assert calls["n"] == 2                       # paused, then continued
     assert turn.text == "The Padres won 5-3." and turn.stop_reason == "end_turn"
     assert turn.usage.input_tokens == 18 and turn.usage.output_tokens == 8   # summed
+
+
+# --- astream_text ------------------------------------------------------------
+
+import asyncio as _asyncio
+
+import httpx as _httpx
+
+from llm_kit import astream_text
+
+
+def _sse(lines):
+    body = "".join(f"data: {l}\n\n" for l in lines).encode()
+    return _httpx.MockTransport(lambda req: _httpx.Response(200, content=body,
+                                headers={"content-type": "text/event-stream"}))
+
+
+async def _collect(gen):
+    return [c async for c in gen]
+
+
+def test_astream_text_anthropic():
+    t = _sse(['{"type":"message_start"}',
+              '{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}',
+              '{"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}',
+              '{"type":"message_stop"}'])
+    out = _asyncio.run(_collect(astream_text([{"role": "user", "content": "hi"}],
+                                             provider="anthropic", api_key="k", transport=t)))
+    assert out == ["Hel", "lo"]
+
+
+def test_astream_text_openai_family():
+    t = _sse(['{"choices":[{"delta":{"role":"assistant"}}]}',
+              '{"choices":[{"delta":{"content":"a"}}]}',
+              '{"choices":[{"delta":{"content":"b"}}]}', "[DONE]"])
+    out = _asyncio.run(_collect(astream_text([{"role": "user", "content": "hi"}],
+                                             provider="xai", api_key="k", transport=t)))
+    assert out == ["a", "b"]
+
+
+def test_astream_text_http_error():
+    import pytest
+    from llm_kit import LLMError
+    t = _httpx.MockTransport(lambda req: _httpx.Response(401, text="nope"))
+    with pytest.raises(LLMError):
+        _asyncio.run(_collect(astream_text([{"role": "user", "content": "hi"}],
+                                           provider="openai", api_key="k", transport=t)))
