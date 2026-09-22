@@ -291,3 +291,130 @@ def test_ledger_roundtrip_has_no_app_field(tmp_path):
     assert set(row) == {"ts", "provider", "model", "in", "out", "cost"}   # no app name, by design
     assert rows[1]["cost"] == round((1000 * 1.0 + 500 * 5.0) / 1_000_000, 6)
     assert read_usage(path=tmp_path / "missing.jsonl") == []
+
+
+# --- vision input: canonical image parts -------------------------------------
+
+import base64  # noqa: E402
+
+from llm_kit import image_part, text_part  # noqa: E402
+
+PNG = b"\x89PNG\r\n\x1a\n-not-really-a-png-"
+B64 = base64.b64encode(PNG).decode()
+VISION = [{"role": "user",
+           "content": [image_part(PNG, "image/png"), text_part("describe this")]}]
+
+
+def test_image_part_encodes_bytes_and_passes_base64_through():
+    assert image_part(PNG, "image/png") == {"type": "image", "media_type": "image/png", "data": B64}
+    assert image_part(B64, "image/jpeg")["data"] == B64
+
+
+def test_anthropic_translates_image_parts_to_base64_blocks():
+    _, out = c._anthropic_messages(VISION)
+    assert out == [{"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": B64}},
+        {"type": "text", "text": "describe this"},
+    ]}]
+
+
+def test_openai_translates_image_parts_to_image_url_data_uri():
+    out = c._openai_messages(VISION)
+    assert out == [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{B64}"}},
+        {"type": "text", "text": "describe this"},
+    ]}]
+
+
+def test_plain_string_content_is_unchanged():
+    msgs = [{"role": "user", "content": "hi"}]
+    assert c._openai_messages(msgs) == [{"role": "user", "content": "hi"}]
+    assert c._anthropic_messages(msgs)[1] == [{"role": "user", "content": "hi"}]
+
+
+def test_system_and_assistant_parts_flatten_to_text():
+    msgs = [{"role": "system", "content": [text_part("be terse"), text_part("be kind")]},
+            {"role": "assistant", "content": [text_part("ok")]}]
+    system, out = c._anthropic_messages(msgs)
+    assert system == "be terse\nbe kind"
+    assert c._openai_messages(msgs) == [
+        {"role": "system", "content": "be terse\nbe kind"},
+        {"role": "assistant", "content": "ok"},
+    ]
+
+
+@pytest.mark.parametrize("bad", [
+    [{"type": "image", "media_type": "image/tiff", "data": B64}],   # unsupported type
+    [{"type": "image", "media_type": "image/png", "data": ""}],     # no data
+    [{"type": "audio", "data": "x"}],                               # unknown part
+    ["just a string in the list"],                                  # not a part dict
+])
+def test_bad_parts_raise_in_both_families(bad):
+    msgs = [{"role": "user", "content": bad}]
+    for fn in (c._anthropic_messages, c._openai_messages):
+        with pytest.raises(LLMError):
+            fn(msgs)
+
+
+def test_images_outside_user_turns_raise():
+    msgs = [{"role": "assistant", "content": [image_part(PNG, "image/png")]}]
+    for fn in (c._anthropic_messages, c._openai_messages):
+        with pytest.raises(LLMError, match="user turns"):
+            fn(msgs)
+
+
+def test_end_to_end_xai_sends_image_and_reads_usage(monkeypatch):
+    cap: dict = {}
+    _mock_client(monkeypatch, cap, {
+        "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 900, "completion_tokens": 40},
+    })
+    turn = chat_with_tools(VISION, provider="xai", model="grok-4.7", api_key="k")
+    content = cap["body"]["messages"][0]["content"]
+    assert content[0]["image_url"]["url"] == f"data:image/png;base64,{B64}"
+    assert content[1] == {"type": "text", "text": "describe this"}
+    assert (turn.usage.input_tokens, turn.usage.output_tokens) == (900, 40)
+
+
+def test_end_to_end_anthropic_sends_image_block(monkeypatch):
+    cap: dict = {}
+    _mock_client(monkeypatch, cap, {"content": [{"type": "text", "text": "a cat"}],
+                                    "usage": {"input_tokens": 3, "output_tokens": 1}})
+    turn = chat_with_tools(VISION, provider="anthropic", api_key="k")
+    assert cap["body"]["messages"][0]["content"][0]["source"]["data"] == B64
+    assert turn.text == "a cat"
+
+
+@pytest.mark.asyncio
+async def test_achat_sends_image_too(monkeypatch):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(c.httpx, "AsyncClient",
+                        lambda *a, **kw: real(*a, **{**kw, "transport": httpx.MockTransport(handler)}))
+    turn = await c.achat_with_tools(VISION, provider="xai", api_key="k")
+    assert seen["body"]["messages"][0]["content"][0]["type"] == "image_url"
+    assert turn.text == "ok"
+
+
+# --- JSON output ---------------------------------------------------------------
+
+def test_json_output_sets_response_format_for_openai_family_only():
+    _, _, xai = c._build_request("xai", "grok-4.7", "k", VISION, None, 256, 0.0, json_output=True)
+    assert xai["response_format"] == {"type": "json_object"}
+    _, _, anth = c._build_request("anthropic", "claude-haiku-4-5", "k", VISION, None, 256, 0.0,
+                                  json_output=True)
+    assert "response_format" not in anth            # no such switch on Messages
+    _, _, plain = c._build_request("xai", "grok-4.7", "k", VISION, None, 256, 0.0)
+    assert "response_format" not in plain           # opt-in; old positional callers unaffected
+
+
+def test_end_to_end_json_output_flag_reaches_the_wire(monkeypatch):
+    cap: dict = {}
+    _mock_client(monkeypatch, cap, {"choices": [{"message": {"content": "{}"}}]})
+    chat_with_tools(VISION, provider="xai", api_key="k", json_output=True)
+    assert cap["body"]["response_format"] == {"type": "json_object"}

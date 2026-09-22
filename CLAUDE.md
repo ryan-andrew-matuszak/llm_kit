@@ -26,6 +26,12 @@ give an app a swappable hosted-LLM tool-caller behind a single seam.
 - Model ids are caller-supplied; only Anthropic's `claude-haiku-4-5` default is
   pinned from first-party docs. Keep `PRICES` current; unknown model ⇒ `$0`.
 
+- Multimodal `content` is a list of canonical parts (`text` / `image` with
+  base64 `data`); `_parts` validates, then `_anthropic_block` / `_openai_part`
+  translate. Images are user-turn only. `_build_request` grew `json_output` as a
+  trailing default arg — Elsewhere calls it positionally, so keep new params
+  trailing and defaulted.
+
 ## Tests
 `python -m pytest tests -q` — offline via `httpx.MockTransport`. Cover any new
 provider with a shape test + an end-to-end mock, like the existing two.

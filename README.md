@@ -60,6 +60,35 @@ branches on provider:
 Append the assistant tool-call turn, then one result message per call, then call
 again. Stop when a turn comes back with no `tool_calls`.
 
+## Vision input (images)
+
+A user turn's `content` can be a list of parts instead of a string — text and
+base64 images, in whatever order you like:
+
+```python
+from llm_kit import achat_with_tools, image_part, text_part
+
+turn = await achat_with_tools(
+    [{"role": "user", "content": [
+        image_part(open("photo.jpg", "rb").read(), "image/jpeg"),   # bytes or base64 str
+        text_part("Describe the hair and eyes."),
+    ]}],
+    provider="xai", model="grok-4.7", json_output=True,
+)
+```
+
+Translated per wire family: Anthropic `image` blocks (`source.type = "base64"`),
+OpenAI/xAI `image_url` data URIs. Images are **user turns only** (`LLMError`
+otherwise), and `media_type` must be one of `IMAGE_TYPES` (jpeg/png/gif/webp) —
+a given model may accept fewer (xAI's vision models take jpeg/png only). Picking
+a vision-capable model is the caller's job; for xAI, `GET /v1/language-models`
+lists each model's `input_modalities`. System/assistant `content` lists are
+flattened to their text.
+
+`json_output=True` asks the OpenAI/xAI family for a JSON-object reply
+(`response_format`). Anthropic's Messages API has no such switch, so there the
+prompt has to ask for JSON — and on every provider, validate what comes back.
+
 ## Streaming
 
 `astream_text(messages, provider=..., model=..., usage=Usage())` is an async

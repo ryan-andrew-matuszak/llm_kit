@@ -26,6 +26,13 @@ Canonical message shapes (plain dicts):
                         "content": str}``
 Use `tool_calls_message()` / `tool_result_message()` to build the last two.
 
+A user turn's ``content`` may also be a **list of parts** (vision input):
+  * ``{"type": "text", "text": str}``
+  * ``{"type": "image", "media_type": "image/jpeg", "data": <base64 str>}``
+`image_part(raw_bytes, media_type)` builds the second. Each adapter translates
+them: Anthropic ``image`` blocks, OpenAI/xAI ``image_url`` data URIs. Images are
+user-turn only; the model must support vision (that's the caller's choice).
+
 Config resolves from args first, then env: ``LLM_PROVIDER``, ``LLM_MODEL``, and
 the provider key (``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` / ``XAI_API_KEY``).
 `estimate_cost()` turns reported token usage into dollars against `PRICES` so a
@@ -33,6 +40,7 @@ caller can log spend and hold a budget.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 from dataclasses import dataclass, field
@@ -124,6 +132,59 @@ def tool_result_message(tool_call_id: str, content: str, name: str = "") -> dict
     return {"role": "tool", "tool_call_id": tool_call_id, "name": name, "content": content}
 
 
+# --- multimodal content parts --------------------------------------------------
+
+#: Image types the wire families accept in common. A given model may take fewer
+#: (xAI's vision models take only jpeg/png) — the caller knows its model.
+IMAGE_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp")
+
+
+def text_part(text: str) -> dict:
+    """Canonical text part of a multimodal ``content`` list."""
+    return {"type": "text", "text": text}
+
+
+def image_part(data: bytes | str, media_type: str) -> dict:
+    """Canonical image part. `data` is raw bytes (base64-encoded here) or an
+    already-base64 string."""
+    if isinstance(data, (bytes, bytearray)):
+        data = base64.b64encode(bytes(data)).decode("ascii")
+    return {"type": "image", "media_type": media_type, "data": data}
+
+
+def _parts(content: Any, role: str) -> list[dict]:
+    """Validate a message's ``content`` into a list of canonical parts. A plain
+    string (or None) is one text part. Raises `LLMError` on a malformed part or on
+    an image anywhere but a user turn."""
+    if content is None or isinstance(content, str):
+        return [text_part(content or "")]
+    if not isinstance(content, list):
+        raise LLMError(f"message content must be a string or a list of parts, got {type(content).__name__}")
+    out = []
+    for part in content:
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind == "text" and isinstance(part.get("text"), str):
+            out.append(part)
+        elif kind == "image":
+            if role != "user":
+                raise LLMError("images are only supported in user turns")
+            if part.get("media_type") not in IMAGE_TYPES:
+                raise LLMError(f"unsupported image type {part.get('media_type')!r}; "
+                               f"known: {', '.join(IMAGE_TYPES)}")
+            if not part.get("data") or not isinstance(part["data"], str):
+                raise LLMError("image part has no base64 data")
+            out.append(part)
+        else:
+            raise LLMError(f"unknown content part: {part!r:.80}")
+    return out
+
+
+def _text_of(content: Any, role: str) -> str:
+    """Just the text of a message's content (parts joined) — for turns whose wire
+    slot is a plain string (system, assistant)."""
+    return "\n".join(p["text"] for p in _parts(content, role) if p["type"] == "text")
+
+
 # --- provider resolution -----------------------------------------------------
 
 
@@ -185,6 +246,13 @@ def _anthropic_tools(tools: list[dict] | None) -> list[dict]:
     return out
 
 
+def _anthropic_block(part: dict) -> dict:
+    if part["type"] == "image":
+        return {"type": "image", "source": {"type": "base64",
+                                            "media_type": part["media_type"], "data": part["data"]}}
+    return {"type": "text", "text": part["text"]}
+
+
 def _anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
     """Translate canonical messages to (system, messages) for /v1/messages.
     Consecutive tool results are merged into one user message (Anthropic wants
@@ -194,8 +262,9 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
     for m in messages:
         role = m["role"]
         if role == "system":
-            if m.get("content"):
-                system_parts.append(m["content"])
+            text = _text_of(m.get("content"), role)
+            if text:
+                system_parts.append(text)
         elif role == "tool":
             block = {"type": "tool_result", "tool_use_id": m["tool_call_id"],
                      "content": m.get("content", "")}
@@ -211,6 +280,8 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
                 content.append({"type": "tool_use", "id": c["id"], "name": c["name"],
                                 "input": c.get("arguments") or {}})
             out.append({"role": "assistant", "content": content})
+        elif isinstance(m.get("content"), list):  # multimodal parts
+            out.append({"role": role, "content": [_anthropic_block(p) for p in _parts(m["content"], role)]})
         else:  # plain user/assistant text
             out.append({"role": role, "content": m.get("content") or ""})
     system = "\n\n".join(system_parts) if system_parts else None
@@ -263,6 +334,13 @@ def _openai_tools(tools: list[dict] | None) -> list[dict]:
     return out
 
 
+def _openai_part(part: dict) -> dict:
+    if part["type"] == "image":
+        return {"type": "image_url",
+                "image_url": {"url": f"data:{part['media_type']};base64,{part['data']}"}}
+    return {"type": "text", "text": part["text"]}
+
+
 def _openai_messages(messages: list[dict]) -> list[dict]:
     out: list[dict] = []
     for m in messages:
@@ -280,15 +358,21 @@ def _openai_messages(messages: list[dict]) -> list[dict]:
                                  "arguments": json.dumps(c.get("arguments") or {})},
                 } for c in m["tool_calls"]],
             })
+        elif role == "user" and isinstance(m.get("content"), list):  # multimodal parts
+            out.append({"role": role, "content": [_openai_part(p) for p in _parts(m["content"], role)]})
+        elif isinstance(m.get("content"), list):                     # system/assistant: text only
+            out.append({"role": role, "content": _text_of(m["content"], role)})
         else:
             out.append({"role": role, "content": m.get("content") or ""})
     return out
 
 
-def _openai_payload(messages, tools, model, max_tokens, temperature) -> dict:
+def _openai_payload(messages, tools, model, max_tokens, temperature, json_output=False) -> dict:
     payload: dict[str, Any] = {"model": model, "max_tokens": max_tokens,
                                "temperature": temperature,
                                "messages": _openai_messages(messages)}
+    if json_output:
+        payload["response_format"] = {"type": "json_object"}
     tl = _openai_tools(tools)
     if tl:
         payload["tools"] = tl
@@ -321,8 +405,12 @@ def _openai_parse(data: dict) -> ChatTurn:
 
 
 def _build_request(provider: str, model: str, key: str, messages, tools,
-                   max_tokens: int, temperature: float) -> tuple[str, dict, dict]:
-    """Return (url, headers, json_payload) for the resolved provider."""
+                   max_tokens: int, temperature: float,
+                   json_output: bool = False) -> tuple[str, dict, dict]:
+    """Return (url, headers, json_payload) for the resolved provider. With
+    `json_output`, the OpenAI/xAI family asks for a JSON-object reply
+    (``response_format``); Anthropic's Messages API has no such switch, so there the
+    prompt must ask for JSON and the caller must validate."""
     spec = PROVIDERS[provider]
     if spec["family"] == "anthropic":
         url = f"{spec['base_url']}/v1/messages"
@@ -332,7 +420,7 @@ def _build_request(provider: str, model: str, key: str, messages, tools,
     else:
         url = f"{spec['base_url']}/chat/completions"
         headers = {"authorization": f"Bearer {key}", "content-type": "application/json"}
-        payload = _openai_payload(messages, tools, model, max_tokens, temperature)
+        payload = _openai_payload(messages, tools, model, max_tokens, temperature, json_output)
     return url, headers, payload
 
 
@@ -354,6 +442,7 @@ def chat_with_tools(
     max_tokens: int = 1024,
     temperature: float = 0.0,
     timeout: float = 30.0,
+    json_output: bool = False,
 ) -> ChatTurn:
     """One synchronous provider call. `messages` are canonical (see module docs);
     `tools` are provider-neutral ``{name, description, parameters(JSON Schema)}``.
@@ -362,7 +451,7 @@ def chat_with_tools(
     mdl = resolve_model(prov, model)
     key = resolve_key(prov, api_key)
     url, headers, payload = _build_request(prov, mdl, key, messages, tools,
-                                           max_tokens, temperature)
+                                           max_tokens, temperature, json_output)
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(url, headers=headers, json=payload)
@@ -385,13 +474,14 @@ async def achat_with_tools(
     max_tokens: int = 1024,
     temperature: float = 0.0,
     timeout: float = 30.0,
+    json_output: bool = False,
 ) -> ChatTurn:
     """Async twin of `chat_with_tools` — use inside an event loop (e.g. FastAPI)."""
     prov = resolve_provider(provider)
     mdl = resolve_model(prov, model)
     key = resolve_key(prov, api_key)
     url, headers, payload = _build_request(prov, mdl, key, messages, tools,
-                                           max_tokens, temperature)
+                                           max_tokens, temperature, json_output)
     anthropic = PROVIDERS[prov]["family"] == "anthropic"
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
