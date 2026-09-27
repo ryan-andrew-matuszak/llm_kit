@@ -6,11 +6,15 @@ See client.py for the full contract. Public surface:
     tool_calls_message / tool_result_message - canonical message builders
     image_part / text_part               - multimodal (vision) content parts
     estimate_cost                        - token usage -> dollars
+    agenerate_image, GeneratedImage      - text -> one image (xAI Imagine)
     PROVIDERS, PRICES                    - the registries
     LLMError                             - raised on transport/HTTP/credential failure
 """
 from .client import (
+    IMAGE_MODELS,
+    IMAGE_PRICES,
     IMAGE_TYPES,
+    GeneratedImage,
     PRICES,
     PROVIDERS,
     ChatTurn,
@@ -18,9 +22,11 @@ from .client import (
     ToolCall,
     Usage,
     achat_with_tools,
+    agenerate_image,
     astream_text,
     chat_with_tools,
     estimate_cost,
+    image_cost,
     image_part,
     resolve_model,
     resolve_provider,
@@ -43,6 +49,11 @@ __all__ = [
     "text_part",
     "IMAGE_TYPES",
     "estimate_cost",
+    "agenerate_image",
+    "GeneratedImage",
+    "image_cost",
+    "IMAGE_MODELS",
+    "IMAGE_PRICES",
     "resolve_provider",
     "resolve_model",
     "PROVIDERS",
@@ -53,4 +64,4 @@ __all__ = [
     "ledger_path",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

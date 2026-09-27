@@ -4,6 +4,7 @@ Pure translate/parse helpers are tested directly; the end-to-end path is driven
 through an httpx MockTransport so we can assert the exact request each provider
 receives and how its canned reply parses into a ChatTurn.
 """
+import base64
 import json
 
 import httpx
@@ -418,3 +419,44 @@ def test_end_to_end_json_output_flag_reaches_the_wire(monkeypatch):
     _mock_client(monkeypatch, cap, {"choices": [{"message": {"content": "{}"}}]})
     chat_with_tools(VISION, provider="xai", api_key="k", json_output=True)
     assert cap["body"]["response_format"] == {"type": "json_object"}
+
+
+# --- image generation --------------------------------------------------------
+
+def test_generate_image_b64(monkeypatch):
+    import asyncio
+    png = b"\x89PNG\r\n\x1a\n" + b"x" * 16
+    cap = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cap["url"] = str(request.url)
+        cap["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"data": [
+            {"b64_json": base64.b64encode(png).decode(), "revised_prompt": "a lighthouse"}]})
+
+    img = asyncio.run(c.agenerate_image("a lighthouse at dusk", api_key="k", aspect_ratio="2:3",
+                                        transport=httpx.MockTransport(handler)))
+    assert cap["url"] == "https://api.x.ai/v1/images/generations"
+    assert cap["body"]["model"] == "grok-imagine-image-2.0"
+    assert cap["body"]["aspect_ratio"] == "2:3" and cap["body"]["n"] == 1
+    assert img.data == png and img.media_type == "image/png"
+    assert img.revised_prompt == "a lighthouse" and img.cost == 0.04
+
+
+def test_generate_image_url_fallback_and_errors():
+    import asyncio
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/img.jpg":
+            return httpx.Response(200, content=b"\xff\xd8jpeg")
+        if json.loads(request.content)["prompt"] == "bad":
+            return httpx.Response(400, json={"error": "rejected by moderation"})
+        return httpx.Response(200, json={"data": [{"url": "https://cdn.example/img.jpg"}]})
+
+    t = httpx.MockTransport(handler)
+    img = asyncio.run(c.agenerate_image("ok", api_key="k", transport=t))
+    assert img.data == b"\xff\xd8jpeg" and img.media_type == "image/jpeg"
+    with pytest.raises(c.LLMError, match="moderation"):
+        asyncio.run(c.agenerate_image("bad", api_key="k", transport=t))
+    with pytest.raises(c.LLMError, match="can't generate images"):
+        asyncio.run(c.agenerate_image("x", provider="anthropic", api_key="k", transport=t))

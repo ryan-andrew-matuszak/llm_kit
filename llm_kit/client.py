@@ -597,3 +597,97 @@ async def astream_text(
                         yield text
     except httpx.HTTPError as exc:
         raise LLMError(f"{prov} request failed: {exc}") from exc
+
+
+# --- image generation ----------------------------------------------------------
+#
+# xAI's Imagine API speaks the OpenAI images shape (``POST /images/generations``)
+# but takes ``aspect_ratio`` / ``resolution`` / ``quality`` instead of OpenAI's
+# ``size``, so for now only xAI is wired. Billing is a flat fee per image, not
+# tokens, hence a separate price table.
+
+#: providers that can make images, and the default model for each.
+IMAGE_MODELS: dict[str, str] = {"xai": "grok-imagine-image-2.0"}
+
+#: model id -> {(resolution, quality): $ per image}. Unknown ⇒ $0, like PRICES.
+IMAGE_PRICES: dict[str, dict[tuple[str, str], float]] = {
+    "grok-imagine-image-2.0": {("1k", "low"): 0.04, ("1k", "medium"): 0.06,
+                               ("2k", "low"): 0.06, ("2k", "medium"): 0.08},
+}
+
+
+@dataclass
+class GeneratedImage:
+    """One image. `data` is the raw bytes (PNG/JPEG); `cost` is the flat-fee estimate."""
+    data: bytes
+    media_type: str
+    revised_prompt: str | None = None
+    cost: float = 0.0
+
+
+def image_cost(model: str, resolution: str = "1k", quality: str = "low") -> float:
+    table = IMAGE_PRICES.get(model) or next(
+        (v for k, v in IMAGE_PRICES.items() if model.startswith(k)), {})
+    return table.get((resolution, quality), 0.0)
+
+
+def _sniff_image(data: bytes) -> str:
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _image_payload(model: str, prompt: str, aspect_ratio: str, resolution: str,
+                   quality: str) -> dict:
+    return {"model": model, "prompt": prompt, "n": 1, "aspect_ratio": aspect_ratio,
+            "resolution": resolution, "quality": quality, "response_format": "b64_json"}
+
+
+async def agenerate_image(
+    prompt: str,
+    *,
+    provider: str = "xai",
+    model: str | None = None,
+    api_key: str | None = None,
+    aspect_ratio: str = "1:1",
+    resolution: str = "1k",
+    quality: str = "low",
+    timeout: float = 120.0,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> GeneratedImage:
+    """Text → one image. Returns bytes whether the provider answers with base64 or
+    a (temporary) URL, which is fetched before returning. Raises `LLMError` on any
+    failure, including a moderation rejection (the provider's message is kept)."""
+    prov = resolve_provider(provider)
+    if prov not in IMAGE_MODELS:
+        raise LLMError(f"provider {prov!r} can't generate images; known: {', '.join(IMAGE_MODELS)}")
+    mdl = (model or IMAGE_MODELS[prov]).strip()
+    key = resolve_key(prov, api_key)
+    url = PROVIDERS[prov]["base_url"].rstrip("/") + "/images/generations"
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    payload = _image_payload(mdl, prompt, aspect_ratio, resolution, quality)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            items = resp.json().get("data") or []
+            if not items:
+                raise LLMError(f"{prov} returned no image")
+            item = items[0]
+            if item.get("b64_json"):
+                data = base64.b64decode(item["b64_json"])
+            elif item.get("url"):
+                got = await client.get(item["url"])
+                got.raise_for_status()
+                data = got.content
+            else:
+                raise LLMError(f"{prov} image had neither b64_json nor url")
+    except httpx.HTTPStatusError as exc:
+        raise LLMError(f"{prov} HTTP {exc.response.status_code}: {exc.response.text[:400]}") from exc
+    except httpx.HTTPError as exc:
+        raise LLMError(f"{prov} request failed: {exc}") from exc
+    return GeneratedImage(data=data, media_type=_sniff_image(data),
+                          revised_prompt=item.get("revised_prompt"),
+                          cost=image_cost(mdl, resolution, quality))
