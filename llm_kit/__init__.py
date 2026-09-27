@@ -6,6 +6,8 @@ See client.py for the full contract. Public surface:
     tool_calls_message / tool_result_message - canonical message builders
     image_part / text_part               - multimodal (vision) content parts
     estimate_cost                        - token usage -> dollars
+    speech_cost, SPEECH_PRICES           - text-to-speech characters -> dollars
+    record_usage / record_speech / read_usage - the shared usage ledger
     agenerate_image, GeneratedImage      - text -> one image (xAI Imagine)
     PROVIDERS, PRICES                    - the registries
     LLMError                             - raised on transport/HTTP/credential failure
@@ -17,6 +19,7 @@ from .client import (
     GeneratedImage,
     PRICES,
     PROVIDERS,
+    SPEECH_PRICES,
     ChatTurn,
     LLMError,
     ToolCall,
@@ -30,11 +33,12 @@ from .client import (
     image_part,
     resolve_model,
     resolve_provider,
+    speech_cost,
     text_part,
     tool_calls_message,
     tool_result_message,
 )
-from .ledger import ledger_path, read_usage, record_usage
+from .ledger import ledger_path, read_usage, record_speech, record_usage
 
 __all__ = [
     "chat_with_tools",
@@ -58,6 +62,9 @@ __all__ = [
     "resolve_model",
     "PROVIDERS",
     "PRICES",
+    "SPEECH_PRICES",
+    "speech_cost",
+    "record_speech",
     "LLMError",
     "record_usage",
     "read_usage",

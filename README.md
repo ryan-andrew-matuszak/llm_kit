@@ -104,6 +104,12 @@ same ledger so one dashboard shows total spend. **There is deliberately no app
 field** — the ledger says what was spent on which model, never which app spent
 it, so a dashboard built on it can't reveal what's installed.
 
+Text-to-speech is billed by characters, not tokens: `record_speech(provider,
+model, chars)` writes a row with a `chars` field, priced against
+`SPEECH_PRICES` (`speech_cost(model, chars)`). `read_usage` re-prices any row
+stored as `$0` against the current tables, so adding a missing price fixes
+history as well as new calls.
+
 ## Budget
 
 `turn.usage` carries `input_tokens` / `output_tokens`; `estimate_cost(usage,

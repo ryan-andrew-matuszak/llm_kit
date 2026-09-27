@@ -294,6 +294,38 @@ def test_ledger_roundtrip_has_no_app_field(tmp_path):
     assert read_usage(path=tmp_path / "missing.jsonl") == []
 
 
+def test_grok_prices_match_dated_ids():
+    from llm_kit import Usage, estimate_cost
+    assert estimate_cost(Usage(1_000_000, 1_000_000), "grok-4.7") == 8.00
+    assert estimate_cost(Usage(1_000_000, 0), "grok-4.20-0309-non-reasoning") == 1.25
+
+
+def test_speech_rows_are_priced_by_characters(tmp_path):
+    from llm_kit import read_usage, record_speech, speech_cost
+    path = tmp_path / "usage.jsonl"
+    row = record_speech("xai", "grok-tts", 2000, path=path)
+    assert row["chars"] == 2000 and row["in"] == row["out"] == 0
+    assert row["cost"] == speech_cost("grok-tts", 2000) == 0.03
+    assert "app" not in row
+    assert read_usage(path=path)[0]["cost"] == 0.03
+
+
+def test_read_usage_reprices_rows_logged_before_a_price_existed(tmp_path):
+    import json
+    from llm_kit import read_usage
+    path = tmp_path / "usage.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in [
+        {"ts": 1, "provider": "xai", "model": "grok-4.7", "in": 1000, "out": 100, "cost": 0.0},
+        {"ts": 2, "provider": "xai", "model": "mystery-model", "in": 5, "out": 5, "cost": 0.0},
+        {"ts": 3, "provider": "xai", "model": "grok-4.7", "in": 1000, "out": 100, "cost": 0.5},
+    ]) + "\n")
+    a, b, c = read_usage(path=path)
+    assert a["cost"] == round((1000 * 2.0 + 100 * 6.0) / 1_000_000, 6) and a["repriced"]
+    assert b["cost"] == 0.0 and "repriced" not in b      # still unknown: stays free
+    assert c["cost"] == 0.5 and "repriced" not in c      # a real cost is never touched
+    assert read_usage(path=path, reprice=False)[0]["cost"] == 0.0
+
+
 # --- vision input: canonical image parts -------------------------------------
 
 import base64  # noqa: E402

@@ -17,7 +17,7 @@ import os
 import time
 from pathlib import Path
 
-from .client import Usage, estimate_cost
+from .client import Usage, estimate_cost, speech_cost
 
 LEDGER_ENV = "LLM_USAGE_LEDGER"
 MAX_BYTES = 2_000_000     # past this, keep the newest half — telemetry, not records
@@ -34,14 +34,32 @@ def record_usage(provider: str, model: str, usage: Usage, *, cost: float | None 
                  path: str | os.PathLike | None = None) -> dict:
     """Append one call to the ledger and return the row. Never raises on I/O —
     losing a telemetry line must not fail the caller's request."""
-    row = {
+    return _append({
         "ts": int(time.time()),
         "provider": provider,
         "model": model,
         "in": int(usage.input_tokens),
         "out": int(usage.output_tokens),
         "cost": round(estimate_cost(usage, model) if cost is None else cost, 6),
-    }
+    }, path)
+
+
+def record_speech(provider: str, model: str, chars: int, *, cost: float | None = None,
+                  path: str | os.PathLike | None = None) -> dict:
+    """Append one text-to-speech call. Speech is billed by characters, so the row
+    carries `chars` (tokens stay 0) and is priced against `SPEECH_PRICES`."""
+    return _append({
+        "ts": int(time.time()),
+        "provider": provider,
+        "model": model,
+        "in": 0,
+        "out": 0,
+        "chars": int(chars),
+        "cost": round(speech_cost(model, chars) if cost is None else cost, 6),
+    }, path)
+
+
+def _append(row: dict, path) -> dict:
     p = ledger_path(path)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -55,9 +73,14 @@ def record_usage(provider: str, model: str, usage: Usage, *, cost: float | None 
     return row
 
 
-def read_usage(*, since: float | None = None, path: str | os.PathLike | None = None) -> list[dict]:
+def read_usage(*, since: float | None = None, path: str | os.PathLike | None = None,
+               reprice: bool = True) -> list[dict]:
     """Every ledger row (optionally since an epoch time), oldest first. Missing
-    file or bad lines are skipped, not errors."""
+    file or bad lines are skipped, not errors.
+
+    A row written as $0 because its model wasn't in the price table yet is
+    re-priced against today's tables (and flagged `repriced`), so adding a price
+    fixes history too. Rows that carry a real cost are left alone."""
     p = ledger_path(path)
     try:
         text = p.read_text(encoding="utf-8")
@@ -70,5 +93,18 @@ def read_usage(*, since: float | None = None, path: str | os.PathLike | None = N
         except json.JSONDecodeError:
             continue
         if since is None or float(row.get("ts") or 0) >= since:
+            if reprice and not float(row.get("cost") or 0):
+                _reprice(row)
             rows.append(row)
     return rows
+
+
+def _reprice(row: dict) -> None:
+    model = str(row.get("model") or "")
+    if row.get("chars"):
+        cost = speech_cost(model, int(row["chars"]))
+    else:
+        cost = estimate_cost(Usage(int(row.get("in") or 0), int(row.get("out") or 0)), model)
+    if cost:
+        row["cost"] = round(cost, 6)
+        row["repriced"] = True

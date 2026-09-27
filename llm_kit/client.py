@@ -81,6 +81,20 @@ PRICES: dict[str, tuple[float, float]] = {
     "claude-opus-5": (5.00, 25.00),
     "gpt-4o-mini": (0.15, 0.60),
     "grok-3-mini": (0.30, 0.50),
+    # xAI's own table (GET /v1/language-models), checked 2026-09-27. Prefix keys,
+    # so dated/suffixed ids (grok-4.20-0309-non-reasoning) land on their family.
+    "grok-4.7": (2.00, 6.00),
+    "grok-4.6": (2.00, 6.00),
+    "grok-4.5": (2.00, 6.00),
+    "grok-4.3": (1.25, 2.50),
+    "grok-4.20": (1.25, 2.50),
+    "grok-code-fast": (1.00, 2.00),
+    "grok-build": (1.00, 2.00),
+}
+
+#: speech model id -> $ per 1M characters of input text. Unknown ⇒ $0, like PRICES.
+SPEECH_PRICES: dict[str, float] = {
+    "grok-tts": 15.00,   # xAI /v1/tts
 }
 
 
@@ -217,6 +231,13 @@ def price_for(model: str) -> tuple[float, float]:
         return PRICES[model]
     hits = [k for k in PRICES if model.startswith(k)]
     return PRICES[max(hits, key=len)] if hits else (0.0, 0.0)
+
+
+def speech_cost(model: str, chars: int) -> float:
+    """Dollar cost of synthesizing `chars` characters (0.0 for unknown models)."""
+    hits = [k for k in SPEECH_PRICES if model.startswith(k)]
+    rate = SPEECH_PRICES[max(hits, key=len)] if hits else 0.0
+    return chars * rate / 1_000_000
 
 
 def estimate_cost(usage: Usage, model: str) -> float:
