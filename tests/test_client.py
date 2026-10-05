@@ -492,3 +492,12 @@ def test_generate_image_url_fallback_and_errors():
         asyncio.run(c.agenerate_image("bad", api_key="k", transport=t))
     with pytest.raises(c.LLMError, match="can't generate images"):
         asyncio.run(c.agenerate_image("x", provider="anthropic", api_key="k", transport=t))
+
+
+def test_temperature_none_is_left_out():
+    """Newer models reject `temperature`; None means "don't send it"."""
+    from llm_kit.client import _anthropic_payload, _openai_payload
+    msgs = [{"role": "user", "content": "hi"}]
+    assert "temperature" not in _anthropic_payload(msgs, None, "claude-sonnet-5", 10, None)
+    assert "temperature" not in _openai_payload(msgs, None, "gpt-4o-mini", 10, None)
+    assert _anthropic_payload(msgs, None, "claude-haiku-4-5", 10, 0.0)["temperature"] == 0.0

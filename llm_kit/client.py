@@ -311,8 +311,9 @@ def _anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
 
 def _anthropic_payload(messages, tools, model, max_tokens, temperature) -> dict:
     system, msgs = _anthropic_messages(messages)
-    payload: dict[str, Any] = {"model": model, "max_tokens": max_tokens,
-                               "temperature": temperature, "messages": msgs}
+    payload: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": msgs}
+    if temperature is not None:      # None = the model's default (some reject the param)
+        payload["temperature"] = temperature
     if system:
         payload["system"] = system
     tl = _anthropic_tools(tools)
@@ -390,8 +391,9 @@ def _openai_messages(messages: list[dict]) -> list[dict]:
 
 def _openai_payload(messages, tools, model, max_tokens, temperature, json_output=False) -> dict:
     payload: dict[str, Any] = {"model": model, "max_tokens": max_tokens,
-                               "temperature": temperature,
                                "messages": _openai_messages(messages)}
+    if temperature is not None:
+        payload["temperature"] = temperature
     if json_output:
         payload["response_format"] = {"type": "json_object"}
     tl = _openai_tools(tools)
@@ -426,7 +428,7 @@ def _openai_parse(data: dict) -> ChatTurn:
 
 
 def _build_request(provider: str, model: str, key: str, messages, tools,
-                   max_tokens: int, temperature: float,
+                   max_tokens: int, temperature: float | None,
                    json_output: bool = False) -> tuple[str, dict, dict]:
     """Return (url, headers, json_payload) for the resolved provider. With
     `json_output`, the OpenAI/xAI family asks for a JSON-object reply
@@ -461,7 +463,7 @@ def chat_with_tools(
     model: str | None = None,
     api_key: str | None = None,
     max_tokens: int = 1024,
-    temperature: float = 0.0,
+    temperature: float | None = 0.0,
     timeout: float = 30.0,
     json_output: bool = False,
 ) -> ChatTurn:
@@ -493,7 +495,7 @@ async def achat_with_tools(
     model: str | None = None,
     api_key: str | None = None,
     max_tokens: int = 1024,
-    temperature: float = 0.0,
+    temperature: float | None = 0.0,
     timeout: float = 30.0,
     json_output: bool = False,
 ) -> ChatTurn:

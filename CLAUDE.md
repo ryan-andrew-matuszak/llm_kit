@@ -32,6 +32,9 @@ give an app a swappable hosted-LLM tool-caller behind a single seam.
   trailing default arg — Elsewhere calls it positionally, so keep new params
   trailing and defaulted.
 
+- `temperature=None` omits the field entirely: newer models (claude-sonnet-5)
+  reject it with a 400. Defaults stay 0.0 so existing callers are unchanged.
+
 ## Tests
 `python -m pytest tests -q` — offline via `httpx.MockTransport`. Cover any new
 provider with a shape test + an end-to-end mock, like the existing two.
